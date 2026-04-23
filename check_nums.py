@@ -13,7 +13,7 @@ def get_nums(p_idx):
     # Get OSD rotation
     rot = tpo.detect_rotation_needed(img)
     if rot != 0:
-        img = img.rotate(-rot, expand=True)
+        img = img.rotate(-rot, expand=True, resample=Image.BICUBIC)
     
     img.thumbnail((1000, 1000))
     text = pytesseract.image_to_string(img, config='--psm 6 digits')

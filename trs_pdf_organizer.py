@@ -256,15 +256,15 @@ def process_pdf(input_path: str, output_path: str):
         if abs(skew) > 0.5:
             # Rotate PIL image (expand=True to avoid cropping corners)
             info["img"] = info["img"].rotate(-skew, expand=True, resample=Image.BICUBIC)
-            ana_img = ana_img.rotate(-skew, expand=True)
+            ana_img = ana_img.rotate(-skew, expand=True, resample=Image.BICUBIC)
             print(f"  Page {info['idx']+1}: deskewed {skew:.2f}°", flush=True)
 
         # 2. Macro Orientation (OSD + Line Projection)
         rot = detect_rotation_needed(ana_img)
         info["rotation_needed"] = rot
         if rot != 0:
-            info["img"] = info["img"].rotate(-rot, expand=True)
-            ana_img = ana_img.rotate(-rot, expand=True)
+            info["img"] = info["img"].rotate(-rot, expand=True, resample=Image.BICUBIC)
+            ana_img = ana_img.rotate(-rot, expand=True, resample=Image.BICUBIC)
             print(f"  Page {info['idx']+1}: rotated {rot}° CW", flush=True)
 
         # 3. Detect crease shadow
@@ -272,11 +272,11 @@ def process_pdf(input_path: str, output_path: str):
 
         # 4. Extract digits
         try:
-            text = pytesseract.image_to_string(ana_img, config='--psm 6 digits')
+            text = pytesseract.image_to_string(ana_img, config='--psm 6 digits', timeout=10)
             nums = [int(n) for n in re.findall(r'\d+', text) if len(n) <= 3] 
             info["numbers"] = sorted(list(set(nums)))
         except Exception:
-            pass
+            info["numbers"] = []
 
     # ── Step 3: Duplicate removal ───────────────────────────────────────────
     print("[INFO] Removing duplicate pages...")
