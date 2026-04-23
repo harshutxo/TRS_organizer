@@ -19,10 +19,20 @@ from PIL import Image
 import io
 import os
 import pytesseract
+import easyocr
 import re
+import base64
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 # Configure Tesseract path (update if necessary)
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+# Initialize EasyOCR reader for better handwritten/blurry text recognition
+reader = easyocr.Reader(['en'], gpu=False)  # Set gpu=True if GPU available
 
 
 # ─────────────────────────── CONFIGURATION ───────────────────────────────────
@@ -270,13 +280,37 @@ def process_pdf(input_path: str, output_path: str):
         # 3. Detect crease shadow
         info["crease"] = detect_crease(info["img"])
 
-        # 4. Extract digits
+        # 4. Extract digits using Tesseract (for computer-generated), fallback to LLM for handwritten/blurry
+        nums = []
         try:
             text = pytesseract.image_to_string(ana_img, config='--psm 6 digits', timeout=10)
-            nums = [int(n) for n in re.findall(r'\d+', text) if len(n) <= 3] 
-            info["numbers"] = sorted(list(set(nums)))
+            nums = [int(n) for n in re.findall(r'\d+', text) if len(n) <= 3]
         except Exception:
-            info["numbers"] = []
+            pass
+        if not nums and OPENAI_AVAILABLE:
+            try:
+                # Use LLM for handwritten/blurry images
+                buf = io.BytesIO()
+                ana_img.save(buf, format='PNG')
+                img_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+                response = openai.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Extract all numbers (digits) visible in this image. Return only the numbers separated by spaces, no other text."},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                            ]
+                        }
+                    ],
+                    max_tokens=100
+                )
+                text = response.choices[0].message.content
+                nums = [int(n) for n in re.findall(r'\d+', text) if len(n) <= 3]
+            except Exception:
+                pass
+        info["numbers"] = sorted(list(set(nums)))
 
     # ── Step 3: Duplicate removal ───────────────────────────────────────────
     print("[INFO] Removing duplicate pages...")
