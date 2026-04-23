@@ -1,0 +1,6 @@
+__pycache__/
+*.pdf
+*.jpg
+input/
+output/
+run_log.txt
