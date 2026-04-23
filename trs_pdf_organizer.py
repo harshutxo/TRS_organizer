@@ -52,16 +52,26 @@ def detect_rotation_needed(img_pil: Image.Image) -> int:
     """
     Returns CW rotation (0/90) needed to make the page upright.
     Uses horizontal projection profile variance — higher variance = clearer text rows.
-    Only returns non-zero when confidence ratio is high enough.
+    Strips long lines (table grids) first to improve accuracy on forms.
     """
     gray = np.array(img_pil.convert("L"), dtype=np.uint8)
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
+    # Strip long horizontal and vertical lines (table grid)
+    # This helps detect text orientation on grid-heavy pages
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+    h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel)
+    v_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel)
+    
+    text_only = cv2.subtract(binary, h_lines)
+    text_only = cv2.subtract(text_only, v_lines)
+
     def variance(img):
         return float(np.var(img.sum(axis=1).astype(float)))
 
-    v0 = variance(binary)
-    v90 = variance(cv2.rotate(binary, cv2.ROTATE_90_CLOCKWISE))
+    v0 = variance(text_only)
+    v90 = variance(cv2.rotate(text_only, cv2.ROTATE_90_CLOCKWISE))
 
     if v90 > v0:
         ratio = v90 / v0 if v0 > 0 else 999
