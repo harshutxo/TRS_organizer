@@ -18,6 +18,11 @@ from PIL import Image
 import io
 import os
 import sys
+import pytesseract
+import re
+
+# Configure Tesseract path (Update if necessary)
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 
 # ─────────────────────────── CONFIGURATION ───────────────────────────────────
@@ -46,38 +51,96 @@ def phash_similarity(h1: imagehash.ImageHash, h2: imagehash.ImageHash) -> float:
     return 1.0 - dist / max_bits
 
 
+def detect_crease(img_pil: Image.Image) -> str:
+    """
+    Detects if a dark vertical shadow (book crease) exists on the left or right edge.
+    Returns 'left', 'right', or 'none'.
+    """
+    w, h = img_pil.size
+    # Sample narrow strips from the extreme left and right
+    l_strip = np.array(img_pil.crop((0, 0, max(1, int(w*0.05)), h)).convert("L"))
+    r_strip = np.array(img_pil.crop((max(0, int(w*0.95)), 0, w, h)).convert("L"))
+    
+    l_val = l_strip.mean()
+    r_val = r_strip.mean()
+    
+    # If one edge is significantly darker (crease shadow)
+    if l_val < r_val - 8:
+        return "left"
+    elif r_val < l_val - 8:
+        return "right"
+    return "none"
+
+
+def detect_skew_hough(img_pil: Image.Image) -> float:
+    """
+    Uses Hough Line Transform to find the primary angle of lines in the page.
+    Returns the skew angle in degrees (usually between -45 and 45).
+    """
+    gray = np.array(img_pil.convert("L"), dtype=np.uint8)
+    # Thresholding to emphasize lines
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # Detect edges
+    edges = cv2.Canny(binary, 50, 150, apertureSize=3)
+    
+    # Hough Line Transform (Probabilistic)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=100, 
+                            minLineLength=int(img_pil.width * 0.2), 
+                            maxLineGap=20)
+    
+    if lines is None:
+        return 0.0
+
+    angles = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+        # Map to range [-45, 45] around the nearest 90-degree increment
+        # This helps find the "straightness" regardless of 0/90/180/270 orientation
+        angle = (angle + 45) % 90 - 45
+        angles.append(angle)
+    
+    if not angles:
+        return 0.0
+        
+    return float(np.median(angles))
+
+
 # ─────────────────────────── ORIENTATION DETECTION ───────────────────────────
 
 def detect_rotation_needed(img_pil: Image.Image) -> int:
     """
-    Returns CW rotation (0/90) needed to make the page upright.
-    Uses horizontal projection profile variance — higher variance = clearer text rows.
-    Strips long lines (table grids) first to improve accuracy on forms.
+    Returns CW rotation (0/90/180/270) needed to make the page upright.
+    Combines structural line analysis with Tesseract OSD.
     """
+    # 1. Structural approach: Check if most lines are vertical or horizontal
+    # This helps distinguish 0 from 90/270
     gray = np.array(img_pil.convert("L"), dtype=np.uint8)
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    # Strip long horizontal and vertical lines (table grid)
-    # This helps detect text orientation on grid-heavy pages
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
-    h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel)
-    v_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel)
     
-    text_only = cv2.subtract(binary, h_lines)
-    text_only = cv2.subtract(text_only, v_lines)
-
-    def variance(img):
+    def line_strength(img):
+        # Measure variance of projections
         return float(np.var(img.sum(axis=1).astype(float)))
 
-    v0 = variance(text_only)
-    v90 = variance(cv2.rotate(text_only, cv2.ROTATE_90_CLOCKWISE))
+    v0 = line_strength(binary)
+    v90 = line_strength(cv2.rotate(binary, cv2.ROTATE_90_CLOCKWISE))
+    
+    structural_orientation = 0
+    if v90 > v0 * 1.1:
+        structural_orientation = 90
+        
+    # 2. Tesseract OSD (to confirm "Up" vs "Down" and refine 90 vs 270)
+    try:
+        osd = pytesseract.image_to_osd(img_pil)
+        for line in osd.splitlines():
+            if 'Rotate:' in line:
+                tess_rot = int(line.split(':')[1].strip())
+                return tess_rot
+    except Exception:
+        pass
 
-    if v90 > v0:
-        ratio = v90 / v0 if v0 > 0 else 999
-        if ratio >= ORIENTATION_CONFIDENCE_RATIO:
-            return 90
-    return 0
+    return structural_orientation
 
 
 # ─────────────────────────── SPLIT-PAGE PAIRING ──────────────────────────────
@@ -105,19 +168,39 @@ def pairing_score(info_i: dict, info_j: dict) -> float:
     """
     Combined score for i being the LEFT half and j being the RIGHT half.
       - Edge NCC: right-edge of i vs left-edge of j
-      - pHash similarity: pages from the same original doc page look similar
-      - Sequential bonus: if they were adjacent in the original PDF
+      - Crease matching: i should have crease on right, j on left
+      - pHash similarity: pages from same original doc page look similar
+      - Sequential bonus: if they were adjacent in original PDF
+      - OCR Sequence: if numbers on i transition logically to j
     """
     r_strip = extract_edge_strip(info_i["img"], "right")
     l_strip = extract_edge_strip(info_j["img"], "left")
     edge_score = ncc(r_strip, l_strip)
 
     ph_sim = phash_similarity(info_i["phash"], info_j["phash"])
-
     seq_bonus = SEQUENTIAL_BONUS if abs(info_i["idx"] - info_j["idx"]) == 1 else 0
 
+    # Crease consistency (Huge boost for Left-Right spine alignment)
+    crease_bonus = 0
+    c_i = info_i.get("crease", "none")
+    c_j = info_j.get("crease", "none")
+    if c_i == "right" and c_j == "left":
+        crease_bonus = 0.4
+    elif c_i == "right" or c_j == "left":
+        crease_bonus = 0.1
+
+    # OCR sequence bonus
+    ocr_bonus = 0
+    if info_i.get("numbers") and info_j.get("numbers"):
+        if min(info_i["numbers"]) < min(info_j["numbers"]):
+            ocr_bonus = 0.05
+        max_i = max(info_i["numbers"])
+        min_j = min(info_j["numbers"])
+        if abs(max_i + 1 - min_j) <= 1:
+            ocr_bonus += 0.15
+
     # Weighted combination
-    score = 0.5 * edge_score + 0.4 * ph_sim + seq_bonus
+    score = 0.5 * edge_score + 0.3 * ph_sim + seq_bonus + crease_bonus + ocr_bonus
     return score
 
 
@@ -126,10 +209,10 @@ def pairing_score(info_i: dict, info_j: dict) -> float:
 def process_pdf(input_path: str, output_path: str):
     doc = fitz.open(input_path)
     n = len(doc)
-    print(f"[INFO] Opened '{os.path.basename(input_path)}' -- {n} pages total")
+    print(f"[INFO] Opened '{os.path.basename(input_path)}' -- {n} pages total", flush=True)
 
     # ── Step 1: Render pages & compute metadata ─────────────────────────────
-    print("[INFO] Rendering pages...")
+    print("[INFO] Rendering pages...", flush=True)
     pages_info = []
     for i in range(n):
         page = doc[i]
@@ -140,18 +223,43 @@ def process_pdf(input_path: str, output_path: str):
             "phash": perceptual_hash(img),
             "landscape": img.width > img.height * 1.05,
             "rotation_needed": 0,
+            "numbers": [],
+            "crease": "none",
         })
 
-    # ── Step 2: Orientation detection ──────────────────────────────────────
-    print("[INFO] Detecting page orientation...")
+    # ── Step 2: Orientation, OCR & Crease Detection ────────────────────────
+    print("[INFO] Applying structural deskew, orientation, and crease detection...", flush=True)
     for info in pages_info:
-        rot = detect_rotation_needed(info["img"])
+        # Optimization: Resize for analysis
+        ana_img = info["img"].copy()
+        ana_img.thumbnail((1000, 1000))
+
+        # 1. Structural Deskew (Hough Lines)
+        skew = detect_skew_hough(ana_img)
+        if abs(skew) > 0.5:
+            # Rotate PIL image (expand=True to avoid cropping corners)
+            info["img"] = info["img"].rotate(-skew, expand=True, resample=Image.BICUBIC)
+            ana_img = ana_img.rotate(-skew, expand=True)
+            print(f"  Page {info['idx']+1}: deskewed {skew:.2f}°", flush=True)
+
+        # 2. Macro Orientation (OSD + Line Projection)
+        rot = detect_rotation_needed(ana_img)
         info["rotation_needed"] = rot
         if rot != 0:
-            # Apply correction to the image for downstream analysis steps
-            # PIL rotate is CCW; we need CW rotation, so negate
             info["img"] = info["img"].rotate(-rot, expand=True)
-            print(f"  Page {info['idx']+1}: will rotate {rot} degrees CW")
+            ana_img = ana_img.rotate(-rot, expand=True)
+            print(f"  Page {info['idx']+1}: rotated {rot}° CW", flush=True)
+
+        # 3. Detect crease shadow
+        info["crease"] = detect_crease(info["img"])
+
+        # 4. Extract digits
+        try:
+            text = pytesseract.image_to_string(ana_img, config='--psm 6 digits')
+            nums = [int(n) for n in re.findall(r'\d+', text) if len(n) <= 3] 
+            info["numbers"] = sorted(list(set(nums)))
+        except Exception:
+            pass
 
     # ── Step 3: Duplicate removal ───────────────────────────────────────────
     print("[INFO] Removing duplicate pages...")
@@ -164,13 +272,13 @@ def process_pdf(input_path: str, output_path: str):
         for prev in kept:
             if (info["phash"] - prev["phash"]) <= DUPLICATE_HASH_THRESHOLD:
                 print(f"  Page {info['idx']+1} is a duplicate of page "
-                      f"{prev['idx']+1} -- skipped")
+                      f"{prev['idx']+1} -- skipped", flush=True)
                 removed.add(i)
                 dup = True
                 break
         if not dup:
             kept.append(info)
-    print(f"  Kept {len(kept)} / {n} pages after duplicate removal")
+    print(f"  Kept {len(kept)} / {n} pages after duplicate removal", flush=True)
 
     # ── Step 4: Pair split pages ───────────────────────────────────────────
     print("[INFO] Detecting and pairing split-page halves...")
@@ -188,7 +296,7 @@ def process_pdf(input_path: str, output_path: str):
                     score_matrix[i, j] = pairing_score(kept[i], kept[j])
 
         # Greedy optimal pairing with a threshold
-        PAIRING_THRESHOLD = 0.55
+        PAIRING_THRESHOLD = 0.50
         while True:
             max_score = -1
             best_i = best_j = -1
@@ -211,7 +319,7 @@ def process_pdf(input_path: str, output_path: str):
             used.add(best_j)
             print(f"  Pair: input p{kept[best_i]['idx']+1} + "
                   f"input p{kept[best_j]['idx']+1}  "
-                  f"[score={max_score:.3f}]")
+                  f"[score={max_score:.3f}]", flush=True)
 
     # Any remaining unpaired pages
     for i in range(n_kept):
@@ -247,7 +355,7 @@ def process_pdf(input_path: str, output_path: str):
             seen.add(info["idx"])
 
     # ── Step 6: Build output PDF ────────────────────────────────────────────
-    print("[INFO] Building output PDF...")
+    print("[INFO] Building output PDF...", flush=True)
     out_doc = fitz.open()
 
     for item in final_order:
@@ -285,6 +393,11 @@ def process_pdf(input_path: str, output_path: str):
             new_page = out_doc.new_page(width=r1.width + r2.width, height=max(r1.height, r2.height))
             new_page.show_pdf_page(fitz.Rect(0, 0, r1.width, r1.height), temp_doc, 0)
             new_page.show_pdf_page(fitz.Rect(r1.width, 0, r1.width + r2.width, r2.height), temp_doc, 1)
+            
+            # If the stitched page is landscape, rotate it to portrait
+            if new_page.rect.width > new_page.rect.height:
+                new_page.set_rotation(90)
+                
             temp_doc.close()
 
     out_doc.save(output_path, garbage=4, deflate=True, clean=True)
