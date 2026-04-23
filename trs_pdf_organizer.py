@@ -50,7 +50,7 @@ def phash_similarity(h1: imagehash.ImageHash, h2: imagehash.ImageHash) -> float:
 
 def detect_rotation_needed(img_pil: Image.Image) -> int:
     """
-    Returns CW rotation (0/90/180/270) needed to make the page upright.
+    Returns CW rotation (0/90) needed to make the page upright.
     Uses horizontal projection profile variance — higher variance = clearer text rows.
     Only returns non-zero when confidence ratio is high enough.
     """
@@ -60,21 +60,14 @@ def detect_rotation_needed(img_pil: Image.Image) -> int:
     def variance(img):
         return float(np.var(img.sum(axis=1).astype(float)))
 
-    scores = {
-        0:   variance(binary),
-        90:  variance(cv2.rotate(binary, cv2.ROTATE_90_CLOCKWISE)),
-        180: variance(cv2.rotate(binary, cv2.ROTATE_180)),
-        270: variance(cv2.rotate(binary, cv2.ROTATE_90_COUNTERCLOCKWISE)),
-    }
+    v0 = variance(binary)
+    v90 = variance(cv2.rotate(binary, cv2.ROTATE_90_CLOCKWISE))
 
-    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    best_angle, best_score = sorted_scores[0]
-    _, second_score = sorted_scores[1]
-
-    ratio = (best_score / second_score) if second_score > 0 else 999
-    if ratio < ORIENTATION_CONFIDENCE_RATIO:
-        return 0   # not confident — leave as-is
-    return best_angle
+    if v90 > v0:
+        ratio = v90 / v0 if v0 > 0 else 999
+        if ratio >= ORIENTATION_CONFIDENCE_RATIO:
+            return 90
+    return 0
 
 
 # ─────────────────────────── SPLIT-PAGE PAIRING ──────────────────────────────

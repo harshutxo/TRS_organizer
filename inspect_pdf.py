@@ -2,7 +2,10 @@
 import fitz  # pymupdf
 import sys
 
-pdf_path = r"d:\TRS_organizer\30 year doc loc 63.pdf"
+if len(sys.argv) > 1:
+    pdf_path = sys.argv[1]
+else:
+    pdf_path = r"d:\TRS_organizer\30 year doc loc 63.pdf"
 doc = fitz.open(pdf_path)
 
 print(f"Total pages: {len(doc)}")
