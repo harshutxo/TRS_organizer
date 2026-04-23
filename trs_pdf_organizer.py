@@ -284,15 +284,58 @@ def process_pdf(input_path: str, output_path: str):
         print(f"  Output p{out_i+1:02d} <- Input p{info['idx']+1:02d}{tag_str}")
 
 
+import argparse
+
 # ─────────────────────────── ENTRY POINT ─────────────────────────────────────
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        input_pdf  = r"d:\TRS_organizer\30 year doc loc 63.pdf"
-        output_pdf = r"d:\TRS_organizer\30 year doc loc 63_organized.pdf"
+def main():
+    parser = argparse.ArgumentParser(description="TRS PDF Organizer (v3) - Clean, rotate, and pair split PDF pages.")
+    parser.add_argument("input", help="Path to an input PDF file or a directory containing PDFs")
+    parser.add_argument("-o", "--output", help="Output path (file or directory). Defaults to 'output' folder.")
+    
+    args = parser.parse_args()
+    
+    input_path = args.input
+    
+    if os.path.isfile(input_path):
+        # Single file processing
+        if not input_path.lower().endswith(".pdf"):
+            print(f"[ERROR] '{input_path}' is not a PDF file.")
+            return
+            
+        if args.output:
+            output_path = args.output
+        else:
+            # Default output: output folder or same folder with suffix
+            out_dir = "output"
+            if not os.path.exists(out_dir):
+                os.makedirs(out_dir)
+            basename = os.path.basename(input_path)
+            output_path = os.path.join(out_dir, basename.replace(".pdf", "_organized.pdf"))
+            
+        process_pdf(input_path, output_path)
+        
+    elif os.path.isdir(input_path):
+        # Directory processing
+        pdfs = [f for f in os.listdir(input_path) if f.lower().endswith(".pdf")]
+        if not pdfs:
+            print(f"[WARNING] No PDF files found in '{input_path}'")
+            return
+            
+        out_dir = args.output if args.output else "output"
+        if not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+            
+        print(f"[INFO] Found {len(pdfs)} PDFs in '{input_path}'. Processing...")
+        for pdf in pdfs:
+            in_file = os.path.join(input_path, pdf)
+            out_file = os.path.join(out_dir, pdf.replace(".pdf", "_organized.pdf"))
+            try:
+                process_pdf(in_file, out_file)
+            except Exception as e:
+                print(f"[ERROR] Failed to process '{pdf}': {e}")
     else:
-        input_pdf  = sys.argv[1]
-        output_pdf = sys.argv[2] if len(sys.argv) > 2 else \
-                     input_pdf.replace(".pdf", "_organized.pdf")
+        print(f"[ERROR] Input path '{input_path}' does not exist.")
 
-    process_pdf(input_pdf, output_pdf)
+if __name__ == "__main__":
+    main()
