@@ -22,14 +22,26 @@ import pytesseract
 import easyocr
 import re
 import base64
+import logging
 try:
     import openai
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
+
 # Configure Tesseract path (update if necessary)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Try default Windows path, fallback to system PATH, or environment variable
+TESSERACT_CMD = os.environ.get('TESSERACT_CMD')
+if not TESSERACT_CMD:
+    default_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    if os.path.exists(default_path):
+        TESSERACT_CMD = default_path
+if TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
 # Initialize EasyOCR reader for better handwritten/blurry text recognition
 reader = easyocr.Reader(['en'], gpu=False)  # Set gpu=True if GPU available
@@ -164,8 +176,8 @@ def detect_rotation_needed(img_pil: Image.Image) -> int:
             if 'Rotate:' in line:
                 tess_rot = int(line.split(':')[1].strip())
                 return tess_rot
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Tesseract OSD detection failed: {e}")
 
     return structural_orientation
 
@@ -265,16 +277,16 @@ def process_pdf(input_path: str, output_path: str):
         skew = detect_skew_hough(ana_img)
         if abs(skew) > 0.5:
             # Rotate PIL image (expand=True to avoid cropping corners)
-            info["img"] = info["img"].rotate(-skew, expand=True, resample=Image.BICUBIC)
-            ana_img = ana_img.rotate(-skew, expand=True, resample=Image.BICUBIC)
+            info["img"] = info["img"].rotate(-skew, expand=True, resample=Image.Resampling.BICUBIC)
+            ana_img = ana_img.rotate(-skew, expand=True, resample=Image.Resampling.BICUBIC)
             print(f"  Page {info['idx']+1}: deskewed {skew:.2f}°", flush=True)
 
         # 2. Macro Orientation (OSD + Line Projection)
         rot = detect_rotation_needed(ana_img)
         info["rotation_needed"] = rot
         if rot != 0:
-            info["img"] = info["img"].rotate(-rot, expand=True, resample=Image.BICUBIC)
-            ana_img = ana_img.rotate(-rot, expand=True, resample=Image.BICUBIC)
+            info["img"] = info["img"].rotate(-rot, expand=True, resample=Image.Resampling.BICUBIC)
+            ana_img = ana_img.rotate(-rot, expand=True, resample=Image.Resampling.BICUBIC)
             print(f"  Page {info['idx']+1}: rotated {rot}° CW", flush=True)
 
         # 3. Detect crease shadow
@@ -285,8 +297,8 @@ def process_pdf(input_path: str, output_path: str):
         try:
             text = pytesseract.image_to_string(ana_img, config='--psm 6 digits', timeout=10)
             nums = [int(n) for n in re.findall(r'\d+', text) if len(n) <= 3]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Tesseract OCR failed for page {info['idx']+1}: {e}")
         if not nums and OPENAI_AVAILABLE:
             try:
                 # Use LLM for handwritten/blurry images
@@ -308,8 +320,8 @@ def process_pdf(input_path: str, output_path: str):
                 )
                 text = response.choices[0].message.content
                 nums = [int(n) for n in re.findall(r'\d+', text) if len(n) <= 3]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"OpenAI OCR failed for page {info['idx']+1}: {e}")
         info["numbers"] = sorted(list(set(nums)))
 
     # ── Step 3: Duplicate removal ───────────────────────────────────────────
