@@ -4,7 +4,7 @@ A robust Python utility to automatically clean up, organize, and reconstruct sca
 
 ## Features
 
-- **Auto-Rotation:** Detects page text orientation using horizontal projection profile variance and automatically rotates pages upright.
+- **Auto-Rotation & Structural Deskew:** Detects page text orientation using projection profiles and deskews pages using Hough line detection to align the baseline/grid structure.
 - **Duplicate Removal:** Identifies and removes duplicate pages using Perceptual Hashing (pHash) with a customizable similarity threshold.
 - **Split-Page Reconstruction:** Intelligently pairs halves of landscape pages that have been split across multiple portrait pages. Uses a combination of edge Normalized Cross-Correlation (NCC) and perceptual hashing to find the perfect match.
 - **Sequential Context:** Prioritizes keeping originally consecutive pages together when rebuilding the document.

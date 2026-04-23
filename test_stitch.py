@@ -1,35 +1,39 @@
+import argparse
 import fitz
 
-def stitch_pages(pdf_path, p1_idx, p2_idx, out_path):
-    doc = fitz.open(pdf_path)
-    p1 = doc[p1_idx]
-    p2 = doc[p2_idx]
-    
-    r1 = p1.rect
-    r2 = p2.rect
-    
-    # Create new document and page
-    new_doc = fitz.open()
-    new_page = new_doc.new_page(width=r1.width + r2.width, height=max(r1.height, r2.height))
-    
-    # Draw left page
-    new_page.show_pdf_page(fitz.Rect(0, 0, r1.width, r1.height), doc, p1_idx)
-    # Draw right page
-    new_page.show_pdf_page(fitz.Rect(r1.width, 0, r1.width + r2.width, r2.height), doc, p2_idx)
-    
-    new_doc.save(out_path)
-    new_doc.close()
-    doc.close()
-    print(f"Stitched {p1_idx} and {p2_idx} to {out_path}")
 
-import argparse
+def stitch_pages(pdf_path: str, left_index: int, right_index: int, out_path: str) -> None:
+    doc = fitz.open(pdf_path)
+    left_page = doc[left_index]
+    right_page = doc[right_index]
+
+    left_rect = left_page.rect
+    right_rect = right_page.rect
+
+    output = fitz.open()
+    page = output.new_page(width=left_rect.width + right_rect.width, height=max(left_rect.height, right_rect.height))
+    page.show_pdf_page(fitz.Rect(0, 0, left_rect.width, left_rect.height), doc, left_index)
+    page.show_pdf_page(
+        fitz.Rect(left_rect.width, 0, left_rect.width + right_rect.width, right_rect.height),
+        doc,
+        right_index,
+    )
+
+    output.save(out_path)
+    output.close()
+    doc.close()
+    print(f"Stitched pages {left_index} and {right_index} to {out_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Stitch two PDF pages side-by-side.")
+    parser.add_argument("pdf_path", help="PDF file path")
+    parser.add_argument("left_index", type=int, help="Left page index (0-based)")
+    parser.add_argument("right_index", type=int, help="Right page index (0-based)")
+    parser.add_argument("out_path", help="Output PDF path")
+    args = parser.parse_args()
+    stitch_pages(args.pdf_path, args.left_index, args.right_index, args.out_path)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Stitch two PDF pages side-by-side.")
-    parser.add_argument("pdf_path", help="Path to the input PDF file")
-    parser.add_argument("p1_idx", type=int, help="Index of the first page (left side, 0-indexed)")
-    parser.add_argument("p2_idx", type=int, help="Index of the second page (right side, 0-indexed)")
-    parser.add_argument("out_path", help="Path to the output stitched PDF file")
-    
-    args = parser.parse_args()
-    stitch_pages(args.pdf_path, args.p1_idx, args.p2_idx, args.out_path)
+    main()

@@ -1,17 +1,26 @@
 
+import argparse
 import fitz  # pymupdf
-import sys
 
-if len(sys.argv) > 1:
-    pdf_path = sys.argv[1]
-else:
-    pdf_path = r"d:\TRS_organizer\30 year doc loc 63.pdf"
-doc = fitz.open(pdf_path)
 
-print(f"Total pages: {len(doc)}")
-print(f"PDF metadata: {doc.metadata}")
-print()
+def inspect_pdf(pdf_path: str) -> None:
+    doc = fitz.open(pdf_path)
+    print(f"Total pages: {len(doc)}")
+    print(f"PDF metadata: {doc.metadata}\n")
 
-for i, page in enumerate(doc):
-    rect = page.rect
-    print(f"Page {i+1}: width={rect.width:.1f}, height={rect.height:.1f}, rotation={page.rotation}")
+    for index, page in enumerate(doc):
+        rect = page.rect
+        print(f"Page {index + 1}: width={rect.width:.1f}, height={rect.height:.1f}, rotation={page.rotation}")
+
+    doc.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Inspect a PDF for page size and rotation metadata.")
+    parser.add_argument("pdf_path", help="Path to the input PDF file")
+    args = parser.parse_args()
+    inspect_pdf(args.pdf_path)
+
+
+if __name__ == "__main__":
+    main()

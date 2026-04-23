@@ -10,6 +10,7 @@ Usage:
     python trs_pdf_organizer.py [input.pdf] [output.pdf]
 """
 
+import argparse
 import fitz  # PyMuPDF
 import cv2
 import numpy as np
@@ -17,11 +18,10 @@ import imagehash
 from PIL import Image
 import io
 import os
-import sys
 import pytesseract
 import re
 
-# Configure Tesseract path (Update if necessary)
+# Configure Tesseract path (update if necessary)
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 
@@ -29,7 +29,6 @@ pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tessera
 
 DPI = 150
 DUPLICATE_HASH_THRESHOLD = 8        # pHash hamming distance for duplicate detection
-ORIENTATION_CONFIDENCE_RATIO = 1.15 # ratio of best/2nd-best projection variance to apply rotation
 SEQUENTIAL_BONUS = 0.12             # bonus added to pairing score if pages are consecutive
 
 # ─────────────────────────── HELPERS ─────────────────────────────────────────
@@ -106,6 +105,24 @@ def detect_skew_hough(img_pil: Image.Image) -> float:
         
     return float(np.median(angles))
 
+def create_pdf_page_from_image(doc: fitz.Document, img_pil: Image.Image) -> fitz.Page:
+    """Insert a processed PIL image into a new PDF page, preserving deskew and rotation."""
+    buf = io.BytesIO()
+    img_pil.save(buf, format="PNG")
+    img_bytes = buf.getvalue()
+    page = doc.new_page(width=img_pil.width, height=img_pil.height)
+    page.insert_image(fitz.Rect(0, 0, img_pil.width, img_pil.height), stream=img_bytes)
+    return page
+
+
+def stitch_pages(left_img: Image.Image, right_img: Image.Image) -> Image.Image:
+    """Compose two page halves side-by-side into one combined image."""
+    width = left_img.width + right_img.width
+    height = max(left_img.height, right_img.height)
+    stitched = Image.new("RGB", (width, height), color=(255, 255, 255))
+    stitched.paste(left_img, (0, 0))
+    stitched.paste(right_img, (left_img.width, 0))
+    return stitched
 
 # ─────────────────────────── ORIENTATION DETECTION ───────────────────────────
 
@@ -361,44 +378,16 @@ def process_pdf(input_path: str, output_path: str):
     for item in final_order:
         if item["type"] == "single":
             info = item["info"]
-            out_doc.insert_pdf(doc, from_page=info["idx"], to_page=info["idx"])
-            new_page = out_doc[-1]
-            rot = info["rotation_needed"]
-            if rot != 0:
-                new_page.set_rotation((new_page.rotation + rot) % 360)
+            create_pdf_page_from_image(out_doc, info["img"])
         else:
             left_info = item["left"]
             right_info = item["right"]
-            
-            # Create a temporary document to hold the rotated halves
-            temp_doc = fitz.open()
-            
-            # Left half
-            temp_doc.insert_pdf(doc, from_page=left_info["idx"], to_page=left_info["idx"])
-            if left_info["rotation_needed"] != 0:
-                temp_doc[0].set_rotation((temp_doc[0].rotation + left_info["rotation_needed"]) % 360)
-                
-            # Right half
-            temp_doc.insert_pdf(doc, from_page=right_info["idx"], to_page=right_info["idx"])
-            if right_info["rotation_needed"] != 0:
-                temp_doc[1].set_rotation((temp_doc[1].rotation + right_info["rotation_needed"]) % 360)
-                
-            temp_p1 = temp_doc[0]
-            temp_p2 = temp_doc[1]
-                
-            r1 = temp_p1.rect
-            r2 = temp_p2.rect
-            
-            # Stitch them side-by-side
-            new_page = out_doc.new_page(width=r1.width + r2.width, height=max(r1.height, r2.height))
-            new_page.show_pdf_page(fitz.Rect(0, 0, r1.width, r1.height), temp_doc, 0)
-            new_page.show_pdf_page(fitz.Rect(r1.width, 0, r1.width + r2.width, r2.height), temp_doc, 1)
-            
-            # If the stitched page is landscape, rotate it to portrait
+            corrected = stitch_pages(left_info["img"], right_info["img"])
+            new_page = create_pdf_page_from_image(out_doc, corrected)
+
+            # Preserve the original pipeline behavior for landscape stitched pages.
             if new_page.rect.width > new_page.rect.height:
                 new_page.set_rotation(90)
-                
-            temp_doc.close()
 
     out_doc.save(output_path, garbage=4, deflate=True, clean=True)
     out_doc.close()
