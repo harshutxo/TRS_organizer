@@ -82,11 +82,6 @@ def detect_rotation_needed(img_pil: Image.Image) -> int:
 
 # ─────────────────────────── SPLIT-PAGE PAIRING ──────────────────────────────
 
-def is_landscape(page: fitz.Page) -> bool:
-    r = page.rect
-    return r.width > r.height * 1.05
-
-
 def extract_edge_strip(img_pil: Image.Image, side: str, frac: float = 0.20) -> np.ndarray:
     w, h = img_pil.size
     strip_w = max(int(w * frac), 10)
@@ -143,7 +138,7 @@ def process_pdf(input_path: str, output_path: str):
             "idx": i,
             "img": img,
             "phash": perceptual_hash(img),
-            "landscape": is_landscape(page),
+            "landscape": img.width > img.height * 1.05,
             "rotation_needed": 0,
         })
 
@@ -177,61 +172,51 @@ def process_pdf(input_path: str, output_path: str):
             kept.append(info)
     print(f"  Kept {len(kept)} / {n} pages after duplicate removal")
 
-    # ── Step 4: Pair landscape (split) pages ──────────────────────────────
+    # ── Step 4: Pair split pages ───────────────────────────────────────────
     print("[INFO] Detecting and pairing split-page halves...")
-    landscape = [p for p in kept if p["landscape"]]
-    portrait  = [p for p in kept if not p["landscape"]]
-
-    print(f"  Landscape pages (input#): {[p['idx']+1 for p in landscape]}")
-    print(f"  Portrait pages  (input#): {[p['idx']+1 for p in portrait]}")
 
     pairs = []        # list of (left_info, right_info_or_None)
     used  = set()
 
-    if len(landscape) >= 2:
-        ls_n = len(landscape)
-
-        # Build full score matrix
-        score_matrix = np.zeros((ls_n, ls_n))
-        for i in range(ls_n):
-            for j in range(ls_n):
+    n_kept = len(kept)
+    if n_kept >= 2:
+        # Build full score matrix for all kept pages
+        score_matrix = np.zeros((n_kept, n_kept))
+        for i in range(n_kept):
+            for j in range(n_kept):
                 if i != j:
-                    score_matrix[i, j] = pairing_score(landscape[i], landscape[j])
+                    score_matrix[i, j] = pairing_score(kept[i], kept[j])
 
-        # Greedy optimal pairing (Hungarian-lite)
+        # Greedy optimal pairing with a threshold
+        PAIRING_THRESHOLD = 0.55
         while True:
-            # Find global maximum in remaining un-used entries
             max_score = -1
             best_i = best_j = -1
-            for i in range(ls_n):
+            for i in range(n_kept):
                 if i in used:
                     continue
-                for j in range(ls_n):
+                for j in range(n_kept):
                     if j in used or i == j:
                         continue
                     if score_matrix[i, j] > max_score:
                         max_score = score_matrix[i, j]
                         best_i, best_j = i, j
 
-            if best_i < 0:
+            if best_i < 0 or max_score < PAIRING_THRESHOLD:
                 break
 
             # Pair i (left) with j (right)
-            pairs.append((landscape[best_i], landscape[best_j]))
+            pairs.append((kept[best_i], kept[best_j]))
             used.add(best_i)
             used.add(best_j)
-            print(f"  Pair: input p{landscape[best_i]['idx']+1} + "
-                  f"input p{landscape[best_j]['idx']+1}  "
+            print(f"  Pair: input p{kept[best_i]['idx']+1} + "
+                  f"input p{kept[best_j]['idx']+1}  "
                   f"[score={max_score:.3f}]")
 
-        # Any remaining unpaired landscape pages
-        for i in range(ls_n):
-            if i not in used:
-                pairs.append((landscape[i], None))
-                print(f"  Standalone landscape: input p{landscape[i]['idx']+1}")
-    else:
-        for p in landscape:
-            pairs.append((p, None))
+    # Any remaining unpaired pages
+    for i in range(n_kept):
+        if i not in used:
+            pairs.append((kept[i], None))
 
     # Build lookup structures
     right_half_idxs  = {right["idx"] for _, right in pairs if right is not None}
@@ -246,33 +231,61 @@ def process_pdf(input_path: str, output_path: str):
         if idx in seen or idx in right_half_idxs:
             continue
 
-        if not info["landscape"]:
-            final_order.append(info)
-            seen.add(idx)
-        else:
+        if idx in pair_map and pair_map[idx][1] is not None:
             left, right = pair_map[idx]
-            final_order.append(left)
+            final_order.append({"type": "stitched", "left": left, "right": right})
             seen.add(left["idx"])
-            if right is not None:
-                final_order.append(right)
-                seen.add(right["idx"])
+            seen.add(right["idx"])
+        else:
+            final_order.append({"type": "single", "info": info})
+            seen.add(idx)
 
     # Safety: add anything missed
     for info in kept:
         if info["idx"] not in seen:
-            final_order.append(info)
+            final_order.append({"type": "single", "info": info})
             seen.add(info["idx"])
 
     # ── Step 6: Build output PDF ────────────────────────────────────────────
     print("[INFO] Building output PDF...")
     out_doc = fitz.open()
 
-    for info in final_order:
-        out_doc.insert_pdf(doc, from_page=info["idx"], to_page=info["idx"])
-        new_page = out_doc[-1]
-        rot = info["rotation_needed"]
-        if rot != 0:
-            new_page.set_rotation((new_page.rotation + rot) % 360)
+    for item in final_order:
+        if item["type"] == "single":
+            info = item["info"]
+            out_doc.insert_pdf(doc, from_page=info["idx"], to_page=info["idx"])
+            new_page = out_doc[-1]
+            rot = info["rotation_needed"]
+            if rot != 0:
+                new_page.set_rotation((new_page.rotation + rot) % 360)
+        else:
+            left_info = item["left"]
+            right_info = item["right"]
+            
+            # Create a temporary document to hold the rotated halves
+            temp_doc = fitz.open()
+            
+            # Left half
+            temp_doc.insert_pdf(doc, from_page=left_info["idx"], to_page=left_info["idx"])
+            if left_info["rotation_needed"] != 0:
+                temp_doc[0].set_rotation((temp_doc[0].rotation + left_info["rotation_needed"]) % 360)
+                
+            # Right half
+            temp_doc.insert_pdf(doc, from_page=right_info["idx"], to_page=right_info["idx"])
+            if right_info["rotation_needed"] != 0:
+                temp_doc[1].set_rotation((temp_doc[1].rotation + right_info["rotation_needed"]) % 360)
+                
+            temp_p1 = temp_doc[0]
+            temp_p2 = temp_doc[1]
+                
+            r1 = temp_p1.rect
+            r2 = temp_p2.rect
+            
+            # Stitch them side-by-side
+            new_page = out_doc.new_page(width=r1.width + r2.width, height=max(r1.height, r2.height))
+            new_page.show_pdf_page(fitz.Rect(0, 0, r1.width, r1.height), temp_doc, 0)
+            new_page.show_pdf_page(fitz.Rect(r1.width, 0, r1.width + r2.width, r2.height), temp_doc, 1)
+            temp_doc.close()
 
     out_doc.save(output_path, garbage=4, deflate=True, clean=True)
     out_doc.close()
@@ -284,14 +297,20 @@ def process_pdf(input_path: str, output_path: str):
     print(f"  Duplicates removed: {len(removed)}")
     print(f"  Output pages      : {len(final_order)}")
     print("\n[INFO] Final page order (Output <- Input):")
-    for out_i, info in enumerate(final_order):
-        tags = []
-        if info["landscape"]:
-            tags.append("landscape/split")
-        if info["rotation_needed"] != 0:
-            tags.append(f"rotated {info['rotation_needed']}deg CW")
-        tag_str = "  [" + ", ".join(tags) + "]" if tags else ""
-        print(f"  Output p{out_i+1:02d} <- Input p{info['idx']+1:02d}{tag_str}")
+    for out_i, item in enumerate(final_order):
+        if item["type"] == "single":
+            info = item["info"]
+            tags = []
+            if info["landscape"]:
+                tags.append("landscape/unpaired")
+            if info["rotation_needed"] != 0:
+                tags.append(f"rotated {info['rotation_needed']}deg CW")
+            tag_str = "  [" + ", ".join(tags) + "]" if tags else ""
+            print(f"  Output p{out_i+1:02d} <- Input p{info['idx']+1:02d}{tag_str}")
+        else:
+            left_info = item["left"]
+            right_info = item["right"]
+            print(f"  Output p{out_i+1:02d} <- [STITCHED] Input p{left_info['idx']+1:02d} (Left) + Input p{right_info['idx']+1:02d} (Right)")
 
 
 import argparse
