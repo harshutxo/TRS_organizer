@@ -56,7 +56,7 @@ SEQUENTIAL_BONUS = 0.12             # bonus added to pairing score if pages are 
 # ─────────────────────────── HELPERS ─────────────────────────────────────────
 
 def page_to_pil(page: fitz.Page, dpi: int = DPI) -> Image.Image:
-    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    mat = fitz.Matrix(DPI / 72, DPI / 72)
     pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
     return Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
 
@@ -296,6 +296,8 @@ def process_pdf(input_path: str, output_path: str):
         nums = []
         try:
             text = pytesseract.image_to_string(ana_img, config='--psm 6 digits', timeout=10)
+            if text is None:
+                text = ""
             nums = [int(n) for n in re.findall(r'\d+', text) if len(n) <= 3]
         except Exception as e:
             logger.debug(f"Tesseract OCR failed for page {info['idx']+1}: {e}")
@@ -319,6 +321,8 @@ def process_pdf(input_path: str, output_path: str):
                     max_tokens=100
                 )
                 text = response.choices[0].message.content
+                if text is None:
+                    text = ""
                 nums = [int(n) for n in re.findall(r'\d+', text) if len(n) <= 3]
             except Exception as e:
                 logger.debug(f"OpenAI OCR failed for page {info['idx']+1}: {e}")
